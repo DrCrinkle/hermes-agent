@@ -1,0 +1,5 @@
+name: oci_vault
+version: "0.1.0"
+description: "Oracle Cloud Infrastructure Vault SecretSource using native SDK authentication."
+author: "DrCrinkle"
+kind: backend
