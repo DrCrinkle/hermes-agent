@@ -18,12 +18,11 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
-from agent.secret_sources.base import ErrorKind, FetchResult, SecretSource, is_valid_env_name
+from agent.secret_sources.base import ErrorKind, FetchResult, SecretSource, get_source_environment, is_valid_env_name
 
 _OCID = re.compile(r"^ocid1\.secret\.oc[0-9a-z.-]+\.[A-Za-z0-9._:/+-]+(?:#[A-Za-z][A-Za-z0-9_.-]*)?$")
 _DEFAULT_TIMEOUT = 30.0
@@ -50,6 +49,7 @@ def _select(value: str, selector: Optional[str]) -> str:
 
 
 def _client(cfg: dict):
+    source_env = get_source_environment()
     try:
         import oci
     except ImportError as exc:
@@ -59,13 +59,13 @@ def _client(cfg: dict):
         signer = oci.auth.signers.InstancePrincipalsSecurityTokenSigner()
         client = oci.secrets.SecretsClient(config={}, signer=signer)
     elif auth == "api_key":
-        config_file = str(cfg.get("config_file") or os.getenv("OCI_CLI_CONFIG_FILE") or "").strip() or None
-        profile = str(cfg.get("profile") or os.getenv("OCI_CLI_PROFILE") or "DEFAULT").strip()
+        config_file = str(cfg.get("config_file") or source_env.get("OCI_CLI_CONFIG_FILE") or "").strip() or None
+        profile = str(cfg.get("profile") or source_env.get("OCI_CLI_PROFILE") or "DEFAULT").strip()
         config = oci.config.from_file(file_location=config_file, profile_name=profile)
         client = oci.secrets.SecretsClient(config)
     else:
         raise ValueError("auth must be instance_principal or api_key; OCI CLI-only auth modes are not supported")
-    region = str(cfg.get("region") or os.getenv("OCI_CLI_REGION") or "").strip()
+    region = str(cfg.get("region") or source_env.get("OCI_CLI_REGION") or "").strip()
     if region:
         client.base_client.set_region(region)
     return client
@@ -76,6 +76,12 @@ class OciVaultSource(SecretSource):
     label = "OCI Vault"
     shape = "mapped"
     scheme = "ocivault"
+    override_existing_default = True
+    remediation_hints = {
+        ErrorKind.AUTH_FAILED: "Check the OCI dynamic-group policy or API-key profile used by secrets.oci_vault.",
+        ErrorKind.NETWORK: "Check OCI service-network access and the configured region.",
+        ErrorKind.BINARY_MISSING: "Install the OCI Vault plugin extra with `uv sync --extra oci-vault`.",
+    }
 
     def config_schema(self) -> dict:
         return {
@@ -86,7 +92,7 @@ class OciVaultSource(SecretSource):
             "config_file": {"description": "OCI API-key config file path", "default": ""},
             "profile": {"description": "OCI API-key profile", "default": "DEFAULT"},
             "timeout_seconds": {"description": "Fetch timeout", "default": _DEFAULT_TIMEOUT},
-            "override_existing": {"description": "Replace existing environment values", "default": False},
+            "override_existing": {"description": "Replace existing environment values", "default": True},
         }
 
     def fetch(self, cfg: dict, home_path: Path) -> FetchResult:
@@ -121,6 +127,16 @@ class OciVaultSource(SecretSource):
             return result.fail("OCI Vault request timed out", ErrorKind.TIMEOUT)
         except Exception as exc:  # noqa: BLE001 — startup secret sources never raise
             text = str(exc).lower()
-            kind = ErrorKind.NETWORK if any(token in text for token in ("timeout", "connection", "network", "dns")) else ErrorKind.INTERNAL
+            status = getattr(exc, "status", None)
+            if status in (401, 403):
+                kind = ErrorKind.AUTH_FAILED
+            elif status == 404:
+                kind = ErrorKind.REF_INVALID
+            elif status == 429 or (isinstance(status, int) and status >= 500):
+                kind = ErrorKind.NETWORK
+            elif any(token in text for token in ("timeout", "connection", "network", "dns")):
+                kind = ErrorKind.NETWORK
+            else:
+                kind = ErrorKind.INTERNAL
             return result.fail(f"OCI Vault fetch failed: {type(exc).__name__}", kind)
         return result

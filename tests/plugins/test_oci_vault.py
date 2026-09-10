@@ -2,6 +2,16 @@ from types import SimpleNamespace
 
 from plugins.oci_vault.source import OciVaultSource
 
+import pytest
+
+from tests.secret_sources.conformance import SecretSourceConformance
+
+
+class TestOciVaultConformance(SecretSourceConformance):
+    @pytest.fixture
+    def source(self):
+        return OciVaultSource()
+
 
 def test_instance_principal_fetch_decodes_base64_and_selects_json(monkeypatch, tmp_path):
     import sys
